@@ -1,0 +1,1171 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  addDoc, 
+  deleteDoc, 
+  doc, 
+  onSnapshot 
+} from 'firebase/firestore';
+import { 
+  Trophy, 
+  Swords, 
+  BarChart3, 
+  PlusCircle, 
+  History, 
+  Users, 
+  Crown, 
+  Flame, 
+  Sparkles, 
+  Trash2, 
+  Calendar, 
+  Filter, 
+  Layers, 
+  Target, 
+  Clock, 
+  RotateCcw, 
+  BookOpen 
+} from 'lucide-react';
+
+// Initialize Firebase using global environment variables or fallbacks
+const firebaseConfig = typeof __firebase_config !== 'undefined' 
+  ? JSON.parse(__firebase_config) 
+  : { apiKey: "demo-api-key", authDomain: "demo.firebaseapp.com", projectId: "demo-project" };
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'the-archive-edh';
+
+// MTG Mana Colors configuration
+const MANA_COLORS = [
+  { code: 'W', name: 'White', bg: 'bg-amber-100 text-slate-950 border-amber-300' },
+  { code: 'U', name: 'Blue', bg: 'bg-blue-600 text-white border-blue-400' },
+  { code: 'B', name: 'Black', bg: 'bg-zinc-800 text-zinc-100 border-zinc-600' },
+  { code: 'R', name: 'Red', bg: 'bg-red-600 text-white border-red-400' },
+  { code: 'G', name: 'Green', bg: 'bg-emerald-600 text-white border-emerald-400' },
+  { code: 'C', name: 'Colorless', bg: 'bg-stone-600 text-stone-100 border-stone-400' },
+];
+
+const BRACKET_OPTIONS = [
+  { id: '1', label: 'Level 1: Casual / Precon', short: 'Lvl 1 (Casual)', color: 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80' },
+  { id: '2', label: 'Level 2: Mid Power', short: 'Lvl 2 (Mid)', color: 'bg-cyan-950/60 text-cyan-400 border-cyan-800/80' },
+  { id: '3', label: 'Level 3: High Power / Optimized', short: 'Lvl 3 (High)', color: 'bg-[#dc3153]/20 text-[#f46d88] border-[#dc3153]/50' },
+  { id: '4', label: 'Level 4: Fringe cEDH', short: 'Lvl 4 (Fringe)', color: 'bg-purple-950/60 text-purple-400 border-purple-800/80' },
+  { id: 'cEDH', label: 'cEDH: Maximum Competitive', short: 'cEDH', color: 'bg-rose-950/60 text-rose-400 border-rose-800/80' }
+];
+
+const WIN_CONDITIONS = [
+  'Combat Damage',
+  'Infinite Combo',
+  'Commander Damage',
+  'Opponent Concession',
+  'Alternate Wincon (e.g. Thoracle/Approach)',
+  'Mill / Deckout'
+];
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [games, setGames] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState('analytics'); // 'log', 'analytics', 'history'
+  
+  // App Notifications
+  const [toast, setToast] = useState(null);
+
+  // Deletion Modal state
+  const [deleteTargetId, setDeleteTargetId] = useState(null);
+
+  // Form state
+  const [formData, setFormData] = useState({
+    date: new Date().toISOString().split('T')[0],
+    bracket: '3',
+    turnCount: '',
+    winCondition: 'Combat Damage',
+    notes: '',
+    players: [
+      { name: '', commander: '', colors: ['W', 'U', 'B', 'R', 'G'], isWinner: true },
+      { name: '', commander: '', colors: ['W', 'U', 'B', 'R', 'G'], isWinner: false },
+      { name: '', commander: '', colors: ['W', 'U', 'B', 'R', 'G'], isWinner: false },
+      { name: '', commander: '', colors: ['W', 'U', 'B', 'R', 'G'], isWinner: false }
+    ]
+  });
+
+  const [submitting, setSubmitting] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState({ player: '', bracket: '' });
+
+  // Show Toast helper
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3500);
+  };
+
+  // Auth setup
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth initialization error:", err);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Listen to Firestore real-time updates
+  useEffect(() => {
+    if (!user) return;
+
+    // Strict path for shared public pod data
+    const gamesCol = collection(db, 'artifacts', appId, 'public', 'data', 'games');
+
+    const unsubscribe = onSnapshot(
+      gamesCol,
+      (snapshot) => {
+        const docs = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+
+        // Sort by date descending
+        docs.sort((a, b) => {
+          const timeA = new Date(a.date || 0).getTime();
+          const timeB = new Date(b.date || 0).getTime();
+          return timeB - timeA;
+        });
+
+        setGames(docs);
+        setLoading(false);
+      },
+      (err) => {
+        console.error("Firestore reader error:", err);
+        setLoading(false);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Extract unique previous player names and commanders for auto-complete
+  const { uniquePlayers, uniqueCommanders } = useMemo(() => {
+    const pSet = new Set();
+    const cSet = new Set();
+
+    games.forEach(g => {
+      if (Array.isArray(g.players)) {
+        g.players.forEach(p => {
+          if (p.name?.trim()) pSet.add(p.name.trim());
+          if (p.commander?.trim()) cSet.add(p.commander.trim());
+        });
+      }
+    });
+
+    return {
+      uniquePlayers: Array.from(pSet).sort(),
+      uniqueCommanders: Array.from(cSet).sort()
+    };
+  }, [games]);
+
+  // Handle Form changes
+  const handlePlayerChange = (index, field, value) => {
+    setFormData(prev => {
+      const updated = [...prev.players];
+      updated[index] = { ...updated[index], [field]: value };
+      return { ...prev, players: updated };
+    });
+  };
+
+  const setWinnerIndex = (winIdx) => {
+    setFormData(prev => ({
+      ...prev,
+      players: prev.players.map((p, idx) => ({
+        ...p,
+        isWinner: idx === winIdx
+      }))
+    }));
+  };
+
+  const togglePlayerColor = (playerIdx, colorCode) => {
+    setFormData(prev => {
+      const updated = [...prev.players];
+      const currentColors = updated[playerIdx].colors || [];
+      const hasColor = currentColors.includes(colorCode);
+
+      const nextColors = hasColor
+        ? currentColors.filter(c => c !== colorCode)
+        : [...currentColors, colorCode];
+
+      updated[playerIdx] = { ...updated[playerIdx], colors: nextColors };
+      return { ...prev, players: updated };
+    });
+  };
+
+  // Pre-fill pod from the most recent game
+  const prefillLastPod = () => {
+    if (games.length === 0) return;
+    const lastGame = games[0];
+    if (!lastGame.players || lastGame.players.length < 4) return;
+
+    setFormData(prev => ({
+      ...prev,
+      players: prev.players.map((p, idx) => ({
+        ...p,
+        name: lastGame.players[idx]?.name || '',
+        commander: '',
+        colors: ['W', 'U', 'B', 'R', 'G']
+      }))
+    }));
+    showToast("Pre-filled player names from previous game!");
+  };
+
+  // Submit Game Log
+  const handleFormSubmit = async (e) => {
+    e.preventDefault();
+    
+    // Validate player entries
+    for (let i = 0; i < formData.players.length; i++) {
+      const p = formData.players[i];
+      if (!p.name.trim()) {
+        showToast(`Please enter Player ${i + 1}'s name`, 'error');
+        return;
+      }
+      if (!p.commander.trim()) {
+        showToast(`Please enter Player ${i + 1}'s Commander`, 'error');
+        return;
+      }
+    }
+
+    const hasWinner = formData.players.some(p => p.isWinner);
+    if (!hasWinner) {
+      showToast("Please select a winner!", 'error');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const gamesCol = collection(db, 'artifacts', appId, 'public', 'data', 'games');
+      await addDoc(gamesCol, {
+        date: formData.date,
+        bracket: formData.bracket,
+        turnCount: formData.turnCount ? parseInt(formData.turnCount, 10) : null,
+        winCondition: formData.winCondition,
+        notes: formData.notes.trim(),
+        players: formData.players.map(p => ({
+          name: p.name.trim(),
+          commander: p.commander.trim(),
+          colors: p.colors || [],
+          isWinner: Boolean(p.isWinner)
+        })),
+        createdAt: new Date().toISOString()
+      });
+
+      showToast("🎮 Match recorded in The Archive!");
+      // Reset commanders and notes, keep player names for fast back-to-back logging
+      setFormData(prev => ({
+        ...prev,
+        turnCount: '',
+        notes: '',
+        players: prev.players.map(p => ({ ...p, commander: '', isWinner: false }))
+      }));
+      setWinnerIndex(0);
+      setActiveTab('analytics');
+    } catch (err) {
+      console.error("Error saving match:", err);
+      showToast("Failed to log game. Check connection.", 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Delete Game Log
+  const handleDeleteGame = async (id) => {
+    try {
+      const gameDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', id);
+      await deleteDoc(gameDocRef);
+      showToast("Game entry deleted");
+      setDeleteTargetId(null);
+    } catch (err) {
+      console.error("Delete error:", err);
+      showToast("Failed to delete entry", 'error');
+    }
+  };
+
+  // Calculate Analytics
+  const analytics = useMemo(() => {
+    const totalGames = games.length;
+
+    if (totalGames === 0) {
+      return {
+        totalGames: 0,
+        playerStats: [],
+        commanderStats: [],
+        mostCommonBracket: '3',
+        bracketCounts: {},
+        winConditionCounts: {}
+      };
+    }
+
+    const playerMap = {};
+    const commanderMap = {};
+    const bracketCounts = { '1': 0, '2': 0, '3': 0, '4': 0, 'cEDH': 0 };
+    const winConditionCounts = {};
+
+    games.forEach(game => {
+      if (game.bracket) {
+        bracketCounts[game.bracket] = (bracketCounts[game.bracket] || 0) + 1;
+      }
+
+      if (game.winCondition) {
+        winConditionCounts[game.winCondition] = (winConditionCounts[game.winCondition] || 0) + 1;
+      }
+
+      if (Array.isArray(game.players)) {
+        game.players.forEach(p => {
+          const pName = p.name ? p.name.trim() : 'Unknown';
+          const cName = p.commander ? p.commander.trim() : 'Unknown';
+          const isWin = Boolean(p.isWinner);
+
+          // Player stats
+          if (!playerMap[pName]) {
+            playerMap[pName] = {
+              name: pName,
+              played: 0,
+              wins: 0,
+              commandersUsed: new Set()
+            };
+          }
+          playerMap[pName].played += 1;
+          if (isWin) playerMap[pName].wins += 1;
+          playerMap[pName].commandersUsed.add(cName);
+
+          // Commander stats
+          if (!commanderMap[cName]) {
+            commanderMap[cName] = {
+              name: cName,
+              played: 0,
+              wins: 0,
+              pilots: new Set()
+            };
+          }
+          commanderMap[cName].played += 1;
+          if (isWin) commanderMap[cName].wins += 1;
+          commanderMap[cName].pilots.add(pName);
+        });
+      }
+    });
+
+    const playerStats = Object.values(playerMap).map(p => ({
+      ...p,
+      winRate: ((p.wins / p.played) * 100).toFixed(1),
+      commandersCount: p.commandersUsed.size
+    })).sort((a, b) => b.wins - a.wins || parseFloat(b.winRate) - parseFloat(a.winRate));
+
+    const commanderStats = Object.values(commanderMap).map(c => ({
+      ...c,
+      winRate: ((c.wins / c.played) * 100).toFixed(1),
+      pilotList: Array.from(c.pilots).join(', ')
+    })).sort((a, b) => b.wins - a.wins || b.played - a.played);
+
+    let maxBracketCount = -1;
+    let mostCommonBracket = '3';
+    Object.entries(bracketCounts).forEach(([bKey, count]) => {
+      if (count > maxBracketCount) {
+        maxBracketCount = count;
+        mostCommonBracket = bKey;
+      }
+    });
+
+    return {
+      totalGames,
+      playerStats,
+      commanderStats,
+      mostCommonBracket,
+      bracketCounts,
+      winConditionCounts
+    };
+  }, [games]);
+
+  // Filtered Match History
+  const filteredGames = useMemo(() => {
+    return games.filter(g => {
+      const matchPlayer = !historyFilter.player || g.players?.some(p => p.name.toLowerCase().includes(historyFilter.player.toLowerCase()));
+      const matchBracket = !historyFilter.bracket || g.bracket === historyFilter.bracket;
+      return matchPlayer && matchBracket;
+    });
+  }, [games, historyFilter]);
+
+  return (
+    <div className="min-h-screen bg-[#121212] text-[#f4f4f5] font-sans antialiased selection:bg-[#dc3153] selection:text-white">
+      
+      {/* Toast Notification */}
+      {toast && (
+        <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl border shadow-2xl backdrop-blur-md flex items-center space-x-3 transition-all duration-300 animate-bounce ${
+          toast.type === 'error' 
+            ? 'bg-rose-950/90 border-rose-500 text-rose-200' 
+            : 'bg-[#1e1e24] border-[#dc3153] text-[#f4f4f5]'
+        }`}>
+          <Sparkles className="w-5 h-5 text-[#dc3153]" />
+          <span className="font-semibold text-sm">{toast.message}</span>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteTargetId && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#1e1e24] border border-zinc-800 rounded-2xl p-6 max-w-md w-full shadow-2xl">
+            <h3 className="text-xl font-bold text-[#f4f4f5] mb-2 flex items-center gap-2">
+              <Trash2 className="w-5 h-5 text-rose-500" /> Delete Archive Entry?
+            </h3>
+            <p className="text-[#a1a1aa] text-sm mb-6">
+              This will remove the match record permanently from your shared archive.
+            </p>
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => setDeleteTargetId(null)}
+                className="px-4 py-2 rounded-xl text-[#a1a1aa] hover:text-[#f4f4f5] hover:bg-zinc-800 text-sm font-semibold transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleDeleteGame(deleteTargetId)}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-sm font-semibold transition shadow-lg shadow-rose-950/50"
+              >
+                Delete Record
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header Banner */}
+      <header className="border-b border-zinc-800/80 bg-[#18181c]/90 backdrop-blur-md sticky top-0 z-40">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            {/* Custom Stamp Logo Icon */}
+            <img 
+              src="eiganjo-archivist_stamp.png" 
+              alt="Eiganjo Archivist Stamp" 
+              className="w-10 h-10 rounded-xl object-cover border border-[#dc3153]/40 shadow-md shadow-[#dc3153]/20"
+            />
+            <div>
+              <h1 className="text-xl font-black tracking-wider text-[#f4f4f5] flex items-center gap-1.5">
+                THE <span className="text-[#dc3153]">ARCHIVE</span>
+              </h1>
+              <p className="text-[10px] text-[#a1a1aa] uppercase tracking-widest font-semibold">EDH Commander Match Records</p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-3">
+            <div className="hidden sm:flex items-center px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-xs text-[#a1a1aa]">
+              <span className="w-2 h-2 rounded-full bg-[#dc3153] mr-2 animate-pulse"></span>
+              Live Sync Active
+            </div>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Container */}
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+        {/* Tab Navigation */}
+        <div className="flex justify-center mb-8">
+          <div className="bg-[#1e1e24] p-1.5 rounded-2xl border border-zinc-800 flex space-x-1.5 max-w-md w-full shadow-inner">
+            <button
+              onClick={() => setActiveTab('log')}
+              className={`flex-1 py-2.5 px-4 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center space-x-2 transition-all duration-200 ${
+                activeTab === 'log'
+                  ? 'bg-[#dc3153] text-white shadow-lg shadow-[#dc3153]/30'
+                  : 'text-[#a1a1aa] hover:text-[#f4f4f5] hover:bg-zinc-800/60'
+              }`}
+            >
+              <PlusCircle className="w-4 h-4" />
+              <span>Log Game</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('analytics')}
+              className={`flex-1 py-2.5 px-4 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center space-x-2 transition-all duration-200 ${
+                activeTab === 'analytics'
+                  ? 'bg-[#dc3153] text-white shadow-lg shadow-[#dc3153]/30'
+                  : 'text-[#a1a1aa] hover:text-[#f4f4f5] hover:bg-zinc-800/60'
+              }`}
+            >
+              <BarChart3 className="w-4 h-4" />
+              <span>Analytics</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('history')}
+              className={`flex-1 py-2.5 px-4 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center space-x-2 transition-all duration-200 ${
+                activeTab === 'history'
+                  ? 'bg-[#dc3153] text-white shadow-lg shadow-[#dc3153]/30'
+                  : 'text-[#a1a1aa] hover:text-[#f4f4f5] hover:bg-zinc-800/60'
+              }`}
+            >
+              <History className="w-4 h-4" />
+              <span>History ({games.length})</span>
+            </button>
+          </div>
+        </div>
+
+        {/* TAB 1: LOG GAME */}
+        {activeTab === 'log' && (
+          <div className="max-w-4xl mx-auto animate-fadeIn">
+            <div className="bg-[#1e1e24] border border-zinc-800 rounded-3xl p-6 sm:p-8 shadow-2xl relative">
+              
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-6 mb-6 border-b border-zinc-800 gap-4">
+                <div>
+                  <h2 className="text-2xl font-black text-[#f4f4f5] flex items-center gap-2.5">
+                    <PlusCircle className="w-6 h-6 text-[#dc3153]" /> Log Match Result
+                  </h2>
+                  <p className="text-[#a1a1aa] text-xs mt-1">Record game details, commanders, and mark the pod winner.</p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={prefillLastPod}
+                  disabled={games.length === 0}
+                  className="px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-[#f46d88] border border-[#dc3153]/30 text-xs font-bold transition flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" /> Quick Fill Last Pod
+                </button>
+              </div>
+
+              <form onSubmit={handleFormSubmit} className="space-y-8">
+                
+                {/* General Game Details */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  {/* Date */}
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-[#a1a1aa] mb-2">
+                      Date Played
+                    </label>
+                    <input
+                      type="date"
+                      value={formData.date}
+                      onChange={(e) => setFormData(prev => ({ ...prev, date: e.target.value }))}
+                      className="w-full bg-[#121212] border border-zinc-700 rounded-xl px-4 py-2.5 text-sm text-[#f4f4f5] focus:outline-none focus:border-[#dc3153] transition"
+                      required
+                    />
+                  </div>
+
+                  {/* Bracket Level */}
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-[#a1a1aa] mb-2">
+                      Bracket Level
+                    </label>
+                    <select
+                      value={formData.bracket}
+                      onChange={(e) => setFormData(prev => ({ ...prev, bracket: e.target.value }))}
+                      className="w-full bg-[#121212] border border-zinc-700 rounded-xl px-3 py-2.5 text-sm text-[#f4f4f5] focus:outline-none focus:border-[#dc3153] transition"
+                    >
+                      {BRACKET_OPTIONS.map(b => (
+                        <option key={b.id} value={b.id}>
+                          {b.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Win Condition */}
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-[#a1a1aa] mb-2">
+                      Win Condition
+                    </label>
+                    <select
+                      value={formData.winCondition}
+                      onChange={(e) => setFormData(prev => ({ ...prev, winCondition: e.target.value }))}
+                      className="w-full bg-[#121212] border border-zinc-700 rounded-xl px-3 py-2.5 text-sm text-[#f4f4f5] focus:outline-none focus:border-[#dc3153] transition"
+                    >
+                      {WIN_CONDITIONS.map(wc => (
+                        <option key={wc} value={wc}>{wc}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Turn Count & Notes Optional */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-[#a1a1aa] mb-2">
+                      Ending Turn (Optional)
+                    </label>
+                    <input
+                      type="number"
+                      placeholder="e.g. 7"
+                      min="1"
+                      max="50"
+                      value={formData.turnCount}
+                      onChange={(e) => setFormData(prev => ({ ...prev, turnCount: e.target.value }))}
+                      className="w-full bg-[#121212] border border-zinc-700 rounded-xl px-4 py-2.5 text-sm text-[#f4f4f5] focus:outline-none focus:border-[#dc3153] transition"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-bold uppercase tracking-wider text-[#a1a1aa] mb-2">
+                      Match Notes / Key Plays (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Turn 5 unexpected Cyclonic Rift blowout"
+                      value={formData.notes}
+                      onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
+                      className="w-full bg-[#121212] border border-zinc-700 rounded-xl px-4 py-2.5 text-sm text-[#f4f4f5] focus:outline-none focus:border-[#dc3153] transition"
+                    />
+                  </div>
+                </div>
+
+                {/* 4 Player Entries Section */}
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between border-b border-zinc-800 pb-2">
+                    <h3 className="text-sm font-bold uppercase tracking-wider text-[#dc3153]">
+                      Pod Players (Select 1 Winner)
+                    </h3>
+                    <span className="text-xs text-[#a1a1aa] font-semibold">4 Players required</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {formData.players.map((player, idx) => (
+                      <div 
+                        key={idx}
+                        className={`p-4 rounded-2xl border transition-all ${
+                          player.isWinner
+                            ? 'bg-[#dc3153]/15 border-[#dc3153] shadow-lg shadow-[#dc3153]/15'
+                            : 'bg-[#121212] border-zinc-800'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-xs font-black uppercase text-[#a1a1aa] flex items-center gap-1.5">
+                            Player {idx + 1}
+                          </span>
+
+                          {/* Winner Toggle Button */}
+                          <button
+                            type="button"
+                            onClick={() => setWinnerIndex(idx)}
+                            className={`px-3 py-1 rounded-full text-xs font-bold transition flex items-center gap-1.5 ${
+                              player.isWinner
+                                ? 'bg-[#dc3153] text-white shadow-md shadow-[#dc3153]/30'
+                                : 'bg-zinc-800 text-[#a1a1aa] hover:text-[#f4f4f5]'
+                            }`}
+                          >
+                            <Crown className="w-3.5 h-3.5" />
+                            {player.isWinner ? 'WINNER' : 'Mark Winner'}
+                          </button>
+                        </div>
+
+                        {/* Player Name Input */}
+                        <div className="mb-3">
+                          <label className="block text-[10px] font-bold text-[#a1a1aa] uppercase mb-1">
+                            Player Name
+                          </label>
+                          <input
+                            type="text"
+                            list={`player-suggestions-${idx}`}
+                            placeholder="e.g. Alex"
+                            value={player.name}
+                            onChange={(e) => handlePlayerChange(idx, 'name', e.target.value)}
+                            className="w-full bg-[#1e1e24] border border-zinc-700 rounded-xl px-3 py-2 text-sm text-[#f4f4f5] focus:outline-none focus:border-[#dc3153] transition"
+                            required
+                          />
+                          <datalist id={`player-suggestions-${idx}`}>
+                            {uniquePlayers.map(p => (
+                              <option key={p} value={p} />
+                            ))}
+                          </datalist>
+                        </div>
+
+                        {/* Commander Name Input */}
+                        <div className="mb-3">
+                          <label className="block text-[10px] font-bold text-[#a1a1aa] uppercase mb-1">
+                            Commander Name
+                          </label>
+                          <input
+                            type="text"
+                            list={`commander-suggestions-${idx}`}
+                            placeholder="e.g. Atraxa, Praetors' Voice"
+                            value={player.commander}
+                            onChange={(e) => handlePlayerChange(idx, 'commander', e.target.value)}
+                            className="w-full bg-[#1e1e24] border border-zinc-700 rounded-xl px-3 py-2 text-sm text-[#f4f4f5] focus:outline-none focus:border-[#dc3153] transition"
+                            required
+                          />
+                          <datalist id={`commander-suggestions-${idx}`}>
+                            {uniqueCommanders.map(c => (
+                              <option key={c} value={c} />
+                            ))}
+                          </datalist>
+                        </div>
+
+                        {/* Color Identity Selector */}
+                        <div>
+                          <label className="block text-[10px] font-bold text-[#a1a1aa] uppercase mb-1.5">
+                            Color Identity
+                          </label>
+                          <div className="flex space-x-1.5">
+                            {MANA_COLORS.map(color => {
+                              const isSelected = player.colors.includes(color.code);
+                              return (
+                                <button
+                                  key={color.code}
+                                  type="button"
+                                  onClick={() => togglePlayerColor(idx, color.code)}
+                                  className={`w-7 h-7 rounded-lg text-xs font-black transition flex items-center justify-center border ${
+                                    isSelected
+                                      ? color.bg
+                                      : 'bg-[#1e1e24] text-zinc-600 border-zinc-800 opacity-40 hover:opacity-100'
+                                  }`}
+                                  title={color.name}
+                                >
+                                  {color.code}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Submit Action */}
+                <div className="pt-4 border-t border-zinc-800 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={submitting}
+                    className="w-full sm:w-auto px-8 py-3.5 rounded-2xl bg-[#dc3153] hover:bg-[#b82441] text-white font-black text-sm shadow-xl shadow-[#dc3153]/30 transition transform active:scale-95 disabled:opacity-50"
+                  >
+                    {submitting ? 'Logging Game...' : 'Submit Game'}
+                  </button>
+                </div>
+
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 2: ANALYTICS DASHBOARD */}
+        {activeTab === 'analytics' && (
+          <div className="space-y-8 animate-fadeIn">
+            
+            {/* Top Stat Summary Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              
+              {/* Card 1: Total Games */}
+              <div className="bg-[#1e1e24] border border-zinc-800 rounded-2xl p-5 shadow-xl relative overflow-hidden group hover:border-zinc-700 transition">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-[#dc3153]/5 rounded-full blur-2xl group-hover:bg-[#dc3153]/15 transition"></div>
+                <div className="flex items-center justify-between text-[#a1a1aa] text-xs font-bold uppercase tracking-wider mb-2">
+                  <span>Total Matches</span>
+                  <BookOpen className="w-4 h-4 text-[#dc3153]" />
+                </div>
+                <div className="text-3xl font-black text-[#f4f4f5]">
+                  {analytics.totalGames}
+                </div>
+                <p className="text-xs text-[#a1a1aa] mt-1">Logged games in Archive</p>
+              </div>
+
+              {/* Card 2: Dominant Leader */}
+              <div className="bg-[#1e1e24] border border-zinc-800 rounded-2xl p-5 shadow-xl relative overflow-hidden group hover:border-zinc-700 transition">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-amber-500/5 rounded-full blur-2xl group-hover:bg-amber-500/10 transition"></div>
+                <div className="flex items-center justify-between text-[#a1a1aa] text-xs font-bold uppercase tracking-wider mb-2">
+                  <span>Top Pod Leader</span>
+                  <Crown className="w-4 h-4 text-amber-400" />
+                </div>
+                <div className="text-2xl font-black text-amber-400 truncate">
+                  {analytics.playerStats[0] ? analytics.playerStats[0].name : 'N/A'}
+                </div>
+                <p className="text-xs text-[#a1a1aa] mt-1">
+                  {analytics.playerStats[0] 
+                    ? `${analytics.playerStats[0].wins} Wins (${analytics.playerStats[0].winRate}% WR)`
+                    : 'Log matches to unlock'}
+                </p>
+              </div>
+
+              {/* Card 3: Top Commander */}
+              <div className="bg-[#1e1e24] border border-zinc-800 rounded-2xl p-5 shadow-xl relative overflow-hidden group hover:border-zinc-700 transition">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-[#dc3153]/5 rounded-full blur-2xl group-hover:bg-[#dc3153]/15 transition"></div>
+                <div className="flex items-center justify-between text-[#a1a1aa] text-xs font-bold uppercase tracking-wider mb-2">
+                  <span>Deadliest Commander</span>
+                  <Trophy className="w-4 h-4 text-[#dc3153]" />
+                </div>
+                <div className="text-2xl font-black text-[#f46d88] truncate">
+                  {analytics.commanderStats[0] ? analytics.commanderStats[0].name : 'N/A'}
+                </div>
+                <p className="text-xs text-[#a1a1aa] mt-1">
+                  {analytics.commanderStats[0] 
+                    ? `${analytics.commanderStats[0].wins} Wins (${analytics.commanderStats[0].winRate}% WR)`
+                    : 'No games logged yet'}
+                </p>
+              </div>
+
+              {/* Card 4: Most Common Bracket */}
+              <div className="bg-[#1e1e24] border border-zinc-800 rounded-2xl p-5 shadow-xl relative overflow-hidden group hover:border-zinc-700 transition">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-cyan-500/5 rounded-full blur-2xl group-hover:bg-cyan-500/10 transition"></div>
+                <div className="flex items-center justify-between text-[#a1a1aa] text-xs font-bold uppercase tracking-wider mb-2">
+                  <span>Primary Bracket Level</span>
+                  <Layers className="w-4 h-4 text-cyan-400" />
+                </div>
+                <div className="text-2xl font-black text-cyan-300">
+                  {BRACKET_OPTIONS.find(b => b.id === analytics.mostCommonBracket)?.short || 'Level 3'}
+                </div>
+                <p className="text-xs text-[#a1a1aa] mt-1">
+                  {analytics.bracketCounts[analytics.mostCommonBracket] || 0} games played at this tier
+                </p>
+              </div>
+
+            </div>
+
+            {/* Grid Row 2: Player Leaderboard & Commander Leaderboard */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              
+              {/* Player Leaderboard */}
+              <div className="bg-[#1e1e24] border border-zinc-800 rounded-2xl p-6 shadow-xl flex flex-col">
+                <div className="flex items-center justify-between mb-6 pb-4 border-b border-zinc-800">
+                  <div className="flex items-center space-x-2">
+                    <Users className="w-5 h-5 text-[#dc3153]" />
+                    <h2 className="text-lg font-bold text-[#f4f4f5]">Player Leaderboard</h2>
+                  </div>
+                  <span className="text-xs text-[#a1a1aa] font-semibold">{analytics.playerStats.length} Total Players</span>
+                </div>
+
+                {analytics.playerStats.length === 0 ? (
+                  <div className="py-12 text-center text-[#a1a1aa] text-sm">
+                    No games recorded. Click "Log Game" to start logging!
+                  </div>
+                ) : (
+                  <div className="space-y-3 overflow-y-auto max-h-[380px] pr-1">
+                    {analytics.playerStats.map((p, idx) => (
+                      <div 
+                        key={p.name}
+                        className="bg-[#121212] border border-zinc-800/80 hover:border-zinc-700 rounded-xl p-4 flex items-center justify-between transition"
+                      >
+                        <div className="flex items-center space-x-3">
+                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-black ${
+                            idx === 0 
+                              ? 'bg-amber-400 text-zinc-950 ring-2 ring-amber-300' 
+                              : idx === 1 
+                              ? 'bg-zinc-300 text-zinc-900' 
+                              : idx === 2 
+                              ? 'bg-amber-700 text-amber-100' 
+                              : 'bg-zinc-800 text-zinc-400'
+                          }`}>
+                            #{idx + 1}
+                          </div>
+                          <div>
+                            <div className="font-bold text-[#f4f4f5] flex items-center gap-1.5">
+                              {p.name}
+                              {idx === 0 && <Crown className="w-3.5 h-3.5 text-amber-400 inline" />}
+                            </div>
+                            <div className="text-xs text-[#a1a1aa]">
+                              {p.commandersCount} unique commander{p.commandersCount > 1 ? 's' : ''}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="text-right">
+                          <div className="text-sm font-black text-[#dc3153]">
+                            {p.wins} Wins <span className="text-xs font-normal text-[#a1a1aa]">({p.played} games)</span>
+                          </div>
+                          <div className="text-xs font-semibold text-emerald-400">
+                            {p.winRate}% Win Rate
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Commander Hall of Fame */}
+              <div className="bg-[#1e1e24] border border-zinc-800 rounded-2xl p-6 shadow-xl flex flex-col">
+                <div className="flex items-center justify-between mb-6 pb-4 border-b border-zinc-800">
+                  <div className="flex items-center space-x-2">
+                    <Flame className="w-5 h-5 text-[#dc3153]" />
+                    <h2 className="text-lg font-bold text-[#f4f4f5]">Commander Hall of Fame</h2>
+                  </div>
+                  <span className="text-xs text-[#a1a1aa] font-semibold">{analytics.commanderStats.length} Commanders</span>
+                </div>
+
+                {analytics.commanderStats.length === 0 ? (
+                  <div className="py-12 text-center text-[#a1a1aa] text-sm">
+                    No commander statistics available yet.
+                  </div>
+                ) : (
+                  <div className="space-y-3 overflow-y-auto max-h-[380px] pr-1">
+                    {analytics.commanderStats.map((c, idx) => (
+                      <div 
+                        key={c.name}
+                        className="bg-[#121212] border border-zinc-800/80 hover:border-zinc-700 rounded-xl p-4 flex items-center justify-between transition"
+                      >
+                        <div className="flex items-center space-x-3">
+                          <div className="w-8 h-8 rounded-xl bg-[#dc3153]/15 border border-[#dc3153]/40 flex items-center justify-center text-xs font-bold text-[#dc3153]">
+                            <Trophy className="w-4 h-4 text-[#dc3153]" />
+                          </div>
+                          <div>
+                            <div className="font-bold text-[#f4f4f5] line-clamp-1">{c.name}</div>
+                            <div className="text-xs text-[#a1a1aa] truncate max-w-[180px]">
+                              Piloted by: <span className="text-zinc-300">{c.pilotList}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="text-right pl-2">
+                          <div className="text-sm font-black text-[#f4f4f5]">
+                            {c.wins} Wins / {c.played} Games
+                          </div>
+                          <div className="text-xs font-semibold text-[#dc3153]">
+                            {c.winRate}% WR
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+            </div>
+
+            {/* Grid Row 3: Bracket Level Breakdown & Win Conditions */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              
+              {/* Bracket Level Breakdown */}
+              <div className="bg-[#1e1e24] border border-zinc-800 rounded-2xl p-6 shadow-xl">
+                <div className="flex items-center space-x-2 mb-6 pb-4 border-b border-zinc-800">
+                  <Layers className="w-5 h-5 text-cyan-400" />
+                  <h2 className="text-lg font-bold text-[#f4f4f5]">Bracket Level Distribution</h2>
+                </div>
+
+                <div className="space-y-4">
+                  {BRACKET_OPTIONS.map(b => {
+                    const count = analytics.bracketCounts[b.id] || 0;
+                    const pct = analytics.totalGames > 0 
+                      ? Math.round((count / analytics.totalGames) * 100) 
+                      : 0;
+
+                    return (
+                      <div key={b.id} className="space-y-1.5">
+                        <div className="flex justify-between items-center text-xs font-semibold">
+                          <span className="text-[#f4f4f5]">{b.label}</span>
+                          <span className="text-[#a1a1aa]">{count} games ({pct}%)</span>
+                        </div>
+                        <div className="w-full h-3 bg-[#121212] rounded-full overflow-hidden p-0.5 border border-zinc-800">
+                          <div 
+                            className="h-full rounded-full bg-gradient-to-r from-[#dc3153] to-amber-500 transition-all duration-500"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Win Condition Analytics */}
+              <div className="bg-[#1e1e24] border border-zinc-800 rounded-2xl p-6 shadow-xl">
+                <div className="flex items-center space-x-2 mb-6 pb-4 border-b border-zinc-800">
+                  <Target className="w-5 h-5 text-[#dc3153]" />
+                  <h2 className="text-lg font-bold text-[#f4f4f5]">Win Condition Breakdown</h2>
+                </div>
+
+                <div className="space-y-4">
+                  {WIN_CONDITIONS.map(wc => {
+                    const count = analytics.winConditionCounts[wc] || 0;
+                    const pct = analytics.totalGames > 0 
+                      ? Math.round((count / analytics.totalGames) * 100) 
+                      : 0;
+
+                    return (
+                      <div key={wc} className="space-y-1.5">
+                        <div className="flex justify-between items-center text-xs font-semibold">
+                          <span className="text-[#f4f4f5]">{wc}</span>
+                          <span className="text-[#a1a1aa]">{count} wins ({pct}%)</span>
+                        </div>
+                        <div className="w-full h-3 bg-[#121212] rounded-full overflow-hidden p-0.5 border border-zinc-800">
+                          <div 
+                            className="h-full rounded-full bg-gradient-to-r from-[#dc3153] to-rose-600 transition-all duration-500"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+            </div>
+
+          </div>
+        )}
+
+        {/* TAB 3: MATCH HISTORY */}
+        {activeTab === 'history' && (
+          <div className="space-y-6 animate-fadeIn">
+            
+            {/* Filter Bar */}
+            <div className="bg-[#1e1e24] border border-zinc-800 rounded-2xl p-4 shadow-lg flex flex-col sm:flex-row gap-4 items-center justify-between">
+              <div className="flex items-center space-x-2 text-[#f4f4f5] text-sm font-bold w-full sm:w-auto">
+                <Filter className="w-4 h-4 text-[#dc3153]" />
+                <span>Filter History</span>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                <input
+                  type="text"
+                  placeholder="Filter by Player Name..."
+                  value={historyFilter.player}
+                  onChange={(e) => setHistoryFilter(prev => ({ ...prev, player: e.target.value }))}
+                  className="bg-[#121212] border border-zinc-700 rounded-xl px-3 py-1.5 text-xs text-[#f4f4f5] focus:outline-none focus:border-[#dc3153]"
+                />
+
+                <select
+                  value={historyFilter.bracket}
+                  onChange={(e) => setHistoryFilter(prev => ({ ...prev, bracket: e.target.value }))}
+                  className="bg-[#121212] border border-zinc-700 rounded-xl px-3 py-1.5 text-xs text-[#f4f4f5] focus:outline-none focus:border-[#dc3153]"
+                >
+                  <option value="">All Brackets</option>
+                  {BRACKET_OPTIONS.map(b => (
+                    <option key={b.id} value={b.id}>{b.short}</option>
+                  ))}
+                </select>
+
+                {(historyFilter.player || historyFilter.bracket) && (
+                  <button
+                    onClick={() => setHistoryFilter({ player: '', bracket: '' })}
+                    className="text-xs text-[#a1a1aa] hover:text-[#dc3153] underline font-semibold py-1 px-2"
+                  >
+                    Clear Filters
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Match List */}
+            {filteredGames.length === 0 ? (
+              <div className="bg-[#1e1e24]/60 border border-zinc-800 rounded-2xl p-12 text-center">
+                <History className="w-12 h-12 text-[#a1a1aa]/40 mx-auto mb-3" />
+                <h3 className="text-lg font-bold text-[#f4f4f5]">No Match Logs Found</h3>
+                <p className="text-xs text-[#a1a1aa] mt-1">Try resetting filters or log a new game.</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {filteredGames.map((game) => {
+                  const bracketInfo = BRACKET_OPTIONS.find(b => b.id === game.bracket) || BRACKET_OPTIONS[2];
+
+                  return (
+                    <div 
+                      key={game.id}
+                      className="bg-[#1e1e24] border border-zinc-800 hover:border-zinc-700 rounded-2xl p-5 shadow-xl transition space-y-4"
+                    >
+                      {/* Top Info Bar */}
+                      <div className="flex flex-wrap items-center justify-between border-b border-zinc-800 pb-3 gap-2">
+                        <div className="flex items-center space-x-3">
+                          <div className="flex items-center text-xs font-bold text-[#f4f4f5]">
+                            <Calendar className="w-3.5 h-3.5 text-[#dc3153] mr-1.5" />
+                            {game.date}
+                          </div>
+
+                          <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${bracketInfo.color}`}>
+                            {bracketInfo.short}
+                          </span>
+
+                          {game.winCondition && (
+                            <span className="bg-[#121212] text-[#f4f4f5] px-2.5 py-0.5 rounded-full text-[10px] font-semibold border border-zinc-800">
+                              {game.winCondition}
+                            </span>
+                          )}
+
+                          {game.turnCount && (
+                            <span className="text-[10px] text-[#a1a1aa] flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-zinc-500" /> Turn {game.turnCount}
+                            </span>
+                          )}
+                        </div>
+
+                        <button
+                          onClick={() => setDeleteTargetId(game.id)}
+                          className="text-[#a1a1aa] hover:text-rose-400 p-1.5 rounded-lg hover:bg-zinc-800 transition"
+                          title="Delete game log"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      {/* 4 Player Grid */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        {game.players?.map((p, pIdx) => (
+                          <div 
+                            key={pIdx}
+                            className={`p-3 rounded-xl border relative transition ${
+                              p.isWinner 
+                                ? 'bg-[#dc3153]/15 border-[#dc3153] shadow-md shadow-[#dc3153]/10' 
+                                : 'bg-[#121212] border-zinc-800'
+                            }`}
+                          >
+                            {p.isWinner && (
+                              <div className="absolute top-2 right-2 flex items-center text-[#dc3153] text-[10px] font-bold bg-[#dc3153]/20 px-2 py-0.5 rounded-full border border-[#dc3153]/40">
+                                <Crown className="w-3 h-3 mr-1" /> WINNER
+                              </div>
+                            )}
+
+                            <div className="font-bold text-sm text-[#f4f4f5] flex items-center gap-1">
+                              {p.name}
+                            </div>
+                            
+                            <div className="text-xs text-[#f46d88] font-medium truncate mt-0.5">
+                              {p.commander}
+                            </div>
+
+                            {/* Colors */}
+                            {Array.isArray(p.colors) && p.colors.length > 0 && (
+                              <div className="flex space-x-1 mt-2">
+                                {p.colors.map(c => {
+                                  const colObj = MANA_COLORS.find(m => m.code === c);
+                                  return (
+                                    <span 
+                                      key={c}
+                                      className={`w-4 h-4 rounded-md text-[9px] font-black flex items-center justify-center border ${colObj ? colObj.bg : 'bg-zinc-800 text-zinc-300'}`}
+                                    >
+                                      {c}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Notes if present */}
+                      {game.notes && (
+                        <div className="text-xs bg-[#121212] border border-zinc-800 rounded-xl p-2.5 text-[#a1a1aa] italic">
+                          "{game.notes}"
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+          </div>
+        )}
+
+      </main>
+    </div>
+  );
+}
